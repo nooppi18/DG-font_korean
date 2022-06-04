@@ -3,6 +3,8 @@ from torchvision.datasets import ImageFolder
 import os
 import torchvision.transforms as transforms
 from datasets.custom_dataset import ImageFolerRemap, CrossdomainFolder
+import numpy as np
+import pickle
 
 class Compose(object):
     def __init__(self, tf):
@@ -45,20 +47,45 @@ def get_dataset(args):
 
     img_dir = args.data_dir
 
+    # same data, different transformation
     dataset = ImageFolerRemap(img_dir, transform=transform, remap_table=remap_table)
     valdataset = ImageFolerRemap(img_dir, transform=transform_val, remap_table=remap_table)
+
     # parse classes to use
-    tot_targets = torch.tensor(dataset.targets)
+    tot_targets = torch.tensor(dataset.targets) # class(style) index
+    T, V = np.unique(tot_targets, return_counts=True)
+    c_num = V[0]
 
     min_data = 99999999
     max_data = 0
 
     train_idx = None
     val_idx = None
+    torch.manual_seed(0)
+    args.V_idx = torch.randperm(int(c_num))[:args.val_num] #[8, 33, 75, 97, 158, 199, 214, 183, 176, 83, 0, 44, 168, 24, 3]
+    args.T_idx = [s for s in range(int(c_num)) if s not in args.V_idx]
+
+
+    ## Saving Validation Contents into txt file
+    # with open('font_freq_train/char_idx.pkl', 'rb') as f:
+    #     font = pickle.load(f)
+    # val_font = []
+    # for idx in args.V_idx:
+    #     val_font.append(font[int(idx)])
+    
+    # with open('val_content.txt', 'w') as fp:
+    #     for font in val_font:
+    #         fp.write('%s\n' %font)
+    #     print('DONE')
+
+    # assert False
+        
+
+    
     for k in class_to_use:
         tmp_idx = (tot_targets == k).nonzero()
-        train_tmp_idx = tmp_idx[:-args.val_num]
-        val_tmp_idx = tmp_idx[-args.val_num:]
+        train_tmp_idx = tmp_idx[args.T_idx] #[:-args.val_num]#
+        val_tmp_idx = tmp_idx[args.V_idx] #[-args.val_num:]#
         if k == class_to_use[0]:
             train_idx = train_tmp_idx.clone()
             val_idx = val_tmp_idx.clone()

@@ -7,6 +7,9 @@ import torch.utils.data.distributed
 from tools.utils import *
 from tools.ops import compute_grad_gp, update_average, copy_norm_params, queue_data, dequeue_data, \
     average_gradients, calc_adv_loss, calc_contrastive_loss, calc_recon_loss
+from torch.autograd import Variable
+
+import numpy as np
 
 
 def trainGAN(data_loader, networks, opts, epoch, args, additional):
@@ -21,6 +24,8 @@ def trainGAN(data_loader, networks, opts, epoch, args, additional):
     g_rec = AverageMeter()
 
     moco_losses = AverageMeter()
+
+    criterion_GAN = torch.nn.MSELoss()
 
     # set nets
     D = networks['D']
@@ -47,6 +52,8 @@ def trainGAN(data_loader, networks, opts, epoch, args, additional):
 
     t_train = trange(0, args.iters, initial=0, total=args.iters)
 
+    Tensor = torch.cuda.FloatTensor 
+
     for i in t_train:
         try:
             imgs, y_org = next(train_it)
@@ -72,6 +79,7 @@ def trainGAN(data_loader, networks, opts, epoch, args, additional):
         ####################
         # BEGIN Train GANs #
         ####################
+        # train discriminator
         with torch.no_grad():
             y_ref = y_org.clone()
             y_ref = y_ref[x_ref_idx]
@@ -81,15 +89,29 @@ def trainGAN(data_loader, networks, opts, epoch, args, additional):
 
         x_ref.requires_grad_()
 
+
+
         d_real_logit, _ = D(x_ref, y_ref)
         d_fake_logit, _ = D(x_fake.detach(), y_ref)
+        
+        if args.discriminator == 'orig':
+            d_adv_real = calc_adv_loss(d_real_logit, 'd_real')
+            d_adv_fake = calc_adv_loss(d_fake_logit, 'd_fake')
+            d_adv = d_adv_real + d_adv_fake
+            patch = False
+            
+        elif args.discriminator == 'patch':
+            valid = Variable(Tensor(np.ones((x_ref.size(0), 18*18))), requires_grad=False)
+            fake = Variable(Tensor(np.zeros((x_fake.size(0), 18*18))), requires_grad=False)
+            d_adv_real = criterion_GAN(d_real_logit, valid)
+            d_adv_fake = criterion_GAN(d_fake_logit, fake)
+            d_adv = 0.5 * (d_adv_real + d_adv_fake)
+            patch = True
 
-        d_adv_real = calc_adv_loss(d_real_logit, 'd_real')
-        d_adv_fake = calc_adv_loss(d_fake_logit, 'd_fake')
+        d_gp = args.w_gp * compute_grad_gp(d_real_logit, x_ref, is_patch=patch)
 
-        d_adv = d_adv_real + d_adv_fake
 
-        d_gp = args.w_gp * compute_grad_gp(d_real_logit, x_ref, is_patch=False)
+         # 돌려봐야지 알듯
 
         d_loss = d_adv + d_gp
 
@@ -101,7 +123,7 @@ def trainGAN(data_loader, networks, opts, epoch, args, additional):
             average_gradients(D)
         d_opt.step()
 
-        # Train G
+        # train Generator
         s_src = C.moco(x_org)
         s_ref = C.moco(x_ref)
 
@@ -110,19 +132,26 @@ def trainGAN(data_loader, networks, opts, epoch, args, additional):
         x_rec, _ = G.decode(c_src, s_src, skip1, skip2)
 
         g_fake_logit, _ = D(x_fake, y_ref)
-        g_rec_logit, _ = D(x_rec, y_org)
+        if args.discriminator == 'orig':
+            g_rec_logit, _ = D(x_rec, y_org)
 
-        g_adv_fake = calc_adv_loss(g_fake_logit, 'g')
-        g_adv_rec = calc_adv_loss(g_rec_logit, 'g')
-
-        g_adv = g_adv_fake + g_adv_rec
+            g_adv_fake = calc_adv_loss(g_fake_logit, 'g')
+            g_adv_rec = calc_adv_loss(g_rec_logit, 'g')
+            g_adv = g_adv_fake + g_adv_rec
+        elif args.discriminator == 'patch':
+            g_adv_fake = criterion_GAN(g_fake_logit, valid)
+            g_adv = g_adv_fake
 
         g_imgrec = calc_recon_loss(x_rec, x_org)
 
         c_x_fake, _, _ = G.cnt_encoder(x_fake)
         g_conrec = calc_recon_loss(c_x_fake, c_src)
 
-        g_loss = args.w_adv * g_adv + args.w_rec * g_imgrec +args.w_rec * g_conrec + args.w_off * offset_loss
+        s_fake = C.moco(x_fake)
+        g_srec = calc_recon_loss(s_fake, s_ref)
+
+
+        g_loss = args.w_adv * g_adv + args.w_rec * g_imgrec +args.w_rec * g_conrec + args.w_off * offset_loss + args.w_srec * g_srec
  
         g_opt.zero_grad()
         c_opt.zero_grad()

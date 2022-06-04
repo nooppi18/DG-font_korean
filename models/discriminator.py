@@ -30,7 +30,7 @@ class Discriminator(nn.Module):
         blocks += [nn.LeakyReLU(0.2)]
         blocks += [nn.Conv2d(dim_out, dim_out, 4, 1, 0)]
         blocks += [nn.LeakyReLU(0.2)]
-        blocks += [nn.Conv2d(dim_out, num_domains, 1, 1, 0)]
+        blocks += [nn.Conv2d(dim_out, num_domains, 1, 1, 0)] #1x1 conv
         self.main = nn.Sequential(*blocks)
 
         self.apply(weights_init('kaiming'))
@@ -57,6 +57,42 @@ class Discriminator(nn.Module):
                 if m.bias is not None:
                     m.bias.data.zero_()
 
+class Discriminator_PatchGAN(nn.Module):
+    def __init__(self, in_channels=3, num_domains=2):
+        super(Discriminator_PatchGAN, self).__init__()
+
+        def discriminator_block(in_filters, out_filters, stride=2, normalization=True):
+            """Returns downsampling layers of each discriminator block"""
+            layers = [nn.Conv2d(in_filters, out_filters, 4, stride=stride, padding=1)]
+            if normalization:
+                layers.append(nn.InstanceNorm2d(out_filters))
+            layers.append(nn.LeakyReLU(0.2, inplace=True))
+            return layers
+
+        self.model = nn.Sequential(
+            #*discriminator_block(in_channels * 2, 64, normalization=False),
+            *discriminator_block(in_channels, 64, normalization=False),
+            *discriminator_block(64, 128),
+            *discriminator_block(128, 256, stride=1),
+            #*discriminator_block(256, 512),
+            #nn.ZeroPad2d((1, 0, 1, 0)),
+            #nn.Conv2d(512, 1, 4, padding=1, bias=False)
+            nn.Conv2d(256, num_domains, 4, padding=1, bias=False) # output = N * num_domains * 18 * 18
+        )
+        
+        self.softmax = nn.Softmax(dim=1)
+
+    def forward(self, img_A, y):
+        # Concatenate image and condition image by channels to produce input
+        out = self.model(img_A) # (batch, num_domains, 18, 18)
+        feat = out.view(out.size(0), out.size(1), -1) # (batch, num_domains, 18*18)
+        idx = torch.LongTensor(range(y.size(0))).to(y.device)
+        logit = feat[idx, y, :] # (batch, 18*18)
+        #logit = self.softmax(feat[idx]) ## '''modified!!'''
+
+        return logit, out
+
+
 
 def weights_init(init_type='gaussian'):
     def init_fun(m):
@@ -80,9 +116,19 @@ def weights_init(init_type='gaussian'):
     return init_fun
 
 
-if __name__ == '__main__':
-    D = Discriminator(64, 10)
-    x_in = torch.randn(4, 3, 64, 64)
-    y_in = torch.randint(0, 10, size=(4, ))
-    out, feat = D(x_in, y_in)
-    print(out.shape, feat.shape)
+# if __name__ == '__main__':
+#     D = Discriminator(64, 10)
+#     x_in = torch.randn(4, 3, 64, 64)
+#     y_in = torch.randint(0, 10, size=(4, ))
+#     print(y_in)
+#     out, feat = D(x_in, y_in)
+#     print(out)
+#     print(out.shape, feat.shape)
+
+# if __name__ == '__main__':
+#     D = Discriminator(3, 10)
+#     x_in = torch.randn(4, 3, 80, 80)
+#     y_in = torch.randint(0, 10, size=(4, ))
+#     print(y_in)
+#     logit, out = D(x_in, y_in)
+#     print(logit.shape, out.shape)
