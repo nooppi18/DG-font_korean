@@ -4,9 +4,8 @@ import torch.optim
 import torch.utils.data
 import torch.utils.data.distributed
 import torchvision.utils as vutils
-import torch.nn.functional as F
 
-import numpy as np
+from score import check
 
 try:
     from tqdm import tqdm
@@ -20,7 +19,7 @@ from scipy import linalg
 from tools.utils import *
 
 
-def validateUN(data_loader, networks, epoch, args, additional=None):
+def validateUN(data_loader, networks, epoch, args, additional=None, test=None):
     # set nets
     D = networks['D']
     G = networks['G'] if not args.distributed else networks['G'].module
@@ -59,51 +58,100 @@ def validateUN(data_loader, networks, epoch, args, additional=None):
                     tmp_sample = torch.cat((tmp_sample, x_), 0)
             x_each_cls.append(tmp_sample)
     
-    
-    if epoch % 10 == 0: #>= args.fid_start: #
-        # Reference guided
+    if test == True:
+        print('test time!')
+        check_ = check()
         with torch.no_grad():
-           # Just a buffer image ( to make a grid )
-            ones = torch.ones(1, x_each_cls[0].size(1), x_each_cls[0].size(2), x_each_cls[0].size(3)).cuda(args.gpu, non_blocking=True)
-            #for src_idx in range(len(args.att_to_use)):
-            print(len(x_each_cls))
-            src_idx = 34 # train 할 때는 5 사용
-            # 원래 아래 전체 for loop 안에 있었음
+            src_idx = 8 # source font 지정
+            x_src = x_each_cls[src_idx].cuda(args.gpu, non_blocking=True)
+            total_ssim = 0
+            total_l1 = 0
+            total_rmse = 0
+            total_lpips = 0
+            for ref_idx in tqdm([args.att_to_use[i] for i in val_font_idx]) : # for each style
+                idx_ssim = 0
+                idx_l1 = 0
+                idx_rmse = 0
+                idx_lpips = 0
+                if ref_idx != src_idx:
+                    x_ref = x_each_cls[ref_idx].cuda(args.gpu, non_blocking=True)
+                    sty_indices = torch.randperm(x_each_cls[src_idx].size(0))
+                    for i in range(divmod(args.val_num, args.val_batch)[0]):
+                        src = x_src[i*args.val_batch :(i+1) * args.val_batch, :, :, :] # content 
+                        sty_idx = sty_indices[i * args.val_batch :(i+1) * args.val_batch]  #:args.val_batch
+                        ref = x_ref[sty_idx] # style img 10
+
+                        gt = x_ref[i * args.val_batch :(i+1) * args.val_batch, :, :, :] #cont
+
+                        c_src, skip1, skip2 = G_EMA.cnt_encoder(src)
+                        s_ref = C_EMA(ref, sty=True)
+                        s_ref_mean = torch.mean(s_ref, dim=0).repeat(args.val_batch, 1) #style ref 10개 평균내기
+                        gen, _ = G_EMA.decode(c_src, s_ref_mean, skip1, skip2)
+                            
+                            
+                        gt_n = (gt-gt.min()) / (gt.max()-gt.min())
+                        gen_n = (gen-gen.min()) / (gen.max()-gen.min())
+
+                        ssim, l1, rmse, lpips = check_.forward(gt_n, gen_n)
+                        idx_ssim += ssim.detach().cpu()
+                        idx_l1 += l1.detach().cpu()
+                        idx_rmse += rmse.detach().cpu()
+                        idx_lpips += lpips.detach().cpu()
+                        
+                total_ssim += idx_ssim / divmod(args.val_num, args.val_batch)[0]
+                total_l1 += idx_l1 / divmod(args.val_num, args.val_batch)[0]
+                total_rmse += idx_rmse / divmod(args.val_num, args.val_batch)[0]
+                total_lpips += idx_lpips / divmod(args.val_num, args.val_batch)[0]
+
+            print('total_ssim',total_ssim/args.val_batch)
+            print('total_l1',total_l1/args.val_batch)
+            print('total_rmse',total_rmse/args.val_batch)
+            print('total_lpips',total_lpips/args.val_batch)
+    
+    else:
+        if epoch % 10 == 0: #>= args.fid_start: #
+            # Reference guided
+            with torch.no_grad():
+            # Just a buffer image ( to make a grid )
+                ones = torch.ones(1, x_each_cls[0].size(1), x_each_cls[0].size(2), x_each_cls[0].size(3)).cuda(args.gpu, non_blocking=True)
+                #for src_idx in range(len(args.att_to_use)):
+                print(len(x_each_cls))
+                src_idx = 84 # train 할 때는 5 사용 // source font 지정
+               
+                x_src = x_each_cls[src_idx][:args.val_batch, :, :, :].cuda(args.gpu, non_blocking=True)
+                rnd_idx = torch.randperm(x_each_cls[src_idx].size(0))[:args.val_batch]
+                x_src_rnd = x_each_cls[src_idx][rnd_idx].cuda(args.gpu, non_blocking=True)
+                for ref_idx in [args.att_to_use[i] for i in val_font_idx] :#range(len(args.att_to_use[val_font_idx])): #(len(args.att_to_use)): #-args.val_num #len(args.att_to_use[-args.val_num:]) (my way)
+                    x_res_ema = torch.cat((ones, x_src), 0)
+                    x_rnd_ema = torch.cat((ones, x_src_rnd), 0)
+                    x_ref = x_each_cls[ref_idx][:args.val_batch, :, :, :].cuda(args.gpu, non_blocking=True)
+                    rnd_idx = torch.randperm(x_each_cls[ref_idx].size(0))[:args.val_batch]
+                    x_ref_rnd = x_each_cls[ref_idx][rnd_idx].cuda(args.gpu, non_blocking=True)
+
+
+                    for sample_idx in range(args.val_batch):
+                        x_ref_tmp = x_ref[sample_idx: sample_idx + 1].repeat((args.val_batch, 1, 1, 1))
+
+                        c_src, skip1, skip2 = G_EMA.cnt_encoder(x_src)
+                        s_ref = C_EMA(x_ref_tmp, sty=True)
+                        
+                        x_res_ema_tmp,_ = G_EMA.decode(c_src, s_ref, skip1, skip2)
+
+                        x_ref_tmp = x_ref_rnd[sample_idx: sample_idx + 1].repeat((args.val_batch, 1, 1, 1))
+
+                        c_src, skip1, skip2 = G_EMA.cnt_encoder(x_src_rnd)
+                        s_ref = C_EMA(x_ref_tmp, sty=True)
+                        x_rnd_ema_tmp,_ = G_EMA.decode(c_src, s_ref, skip1, skip2)
+
+                        x_res_ema_tmp = torch.cat((x_ref[sample_idx: sample_idx + 1], x_res_ema_tmp), 0)
+                        x_res_ema = torch.cat((x_res_ema, x_res_ema_tmp), 0)
+
+                        x_rnd_ema_tmp = torch.cat((x_ref_rnd[sample_idx: sample_idx + 1], x_rnd_ema_tmp), 0)
+                        x_rnd_ema = torch.cat((x_rnd_ema, x_rnd_ema_tmp), 0)
+
+                    vutils.save_image(x_res_ema, os.path.join(args.res_dir, '{}_EMA_{}_{}_{}.jpg'.format(args.gpu, epoch+1, src_idx, ref_idx)), normalize=True,
+                                    nrow=(x_res_ema.size(0) // (x_src.size(0) + 2) + 1))
+                    vutils.save_image(x_rnd_ema, os.path.join(args.res_dir, '{}_RNDEMA_{}_{}_{}.jpg'.format(args.gpu, epoch+1, src_idx, ref_idx)), normalize=True,
+                                    nrow=(x_res_ema.size(0) // (x_src.size(0) + 2) + 1))
                 
-            x_src = x_each_cls[src_idx][:args.val_batch, :, :, :].cuda(args.gpu, non_blocking=True)
-            rnd_idx = torch.randperm(x_each_cls[src_idx].size(0))[:args.val_batch]
-            x_src_rnd = x_each_cls[src_idx][rnd_idx].cuda(args.gpu, non_blocking=True)
-            for ref_idx in [args.att_to_use[i] for i in val_font_idx] :#range(len(args.att_to_use[val_font_idx])): #(len(args.att_to_use)): #-args.val_num #len(args.att_to_use[-args.val_num:]) (my way)
-                x_res_ema = torch.cat((ones, x_src), 0)
-                x_rnd_ema = torch.cat((ones, x_src_rnd), 0)
-                x_ref = x_each_cls[ref_idx][:args.val_batch, :, :, :].cuda(args.gpu, non_blocking=True)
-                rnd_idx = torch.randperm(x_each_cls[ref_idx].size(0))[:args.val_batch]
-                x_ref_rnd = x_each_cls[ref_idx][rnd_idx].cuda(args.gpu, non_blocking=True)
-
-
-                for sample_idx in range(args.val_batch):
-                    x_ref_tmp = x_ref[sample_idx: sample_idx + 1].repeat((args.val_batch, 1, 1, 1))
-
-                    c_src, skip1, skip2 = G_EMA.cnt_encoder(x_src)
-                    s_ref = C_EMA(x_ref_tmp, sty=True)
-                    
-                    x_res_ema_tmp,_ = G_EMA.decode(c_src, s_ref, skip1, skip2)
-
-                    x_ref_tmp = x_ref_rnd[sample_idx: sample_idx + 1].repeat((args.val_batch, 1, 1, 1))
-
-                    c_src, skip1, skip2 = G_EMA.cnt_encoder(x_src_rnd)
-                    s_ref = C_EMA(x_ref_tmp, sty=True)
-                    x_rnd_ema_tmp,_ = G_EMA.decode(c_src, s_ref, skip1, skip2)
-
-                    x_res_ema_tmp = torch.cat((x_ref[sample_idx: sample_idx + 1], x_res_ema_tmp), 0)
-                    x_res_ema = torch.cat((x_res_ema, x_res_ema_tmp), 0)
-
-                    x_rnd_ema_tmp = torch.cat((x_ref_rnd[sample_idx: sample_idx + 1], x_rnd_ema_tmp), 0)
-                    x_rnd_ema = torch.cat((x_rnd_ema, x_rnd_ema_tmp), 0)
-
-                vutils.save_image(x_res_ema, os.path.join(args.res_dir, '{}_EMA_{}_{}_{}.jpg'.format(args.gpu, epoch+1, src_idx, ref_idx)), normalize=True,
-                                nrow=(x_res_ema.size(0) // (x_src.size(0) + 2) + 1))
-                vutils.save_image(x_rnd_ema, os.path.join(args.res_dir, '{}_RNDEMA_{}_{}_{}.jpg'.format(args.gpu, epoch+1, src_idx, ref_idx)), normalize=True,
-                                nrow=(x_res_ema.size(0) // (x_src.size(0) + 2) + 1))
-            
 
