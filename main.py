@@ -42,6 +42,8 @@ parser.add_argument('--model_name', type=str, default='GAN',
                          'ex) --model_name=ABC generates ABC_20191230-131145 in logs and results')
 parser.add_argument('--discriminator', type=str, default='orig', choices = ['orig', 'patch'],
                     help='Choose which discriminator to use original vs patchGAN')
+parser.add_argument('--c_disc', type=str, default='False', choices = ['True', 'False'],
+                    help='Whether to use content discriminator')
 
 parser.add_argument('--epochs', default=250, type=int, help='Total number of epochs to run. Not actual epoch.')
 parser.add_argument('--iters', default=1000, type=int, help='Total number of iterations per epoch') # 1000
@@ -225,7 +227,7 @@ def main_worker(gpu, ngpus_per_node, args):
 
     # All the test is done in the training - do not need to call
     if args.validation:
-        validationFunc(val_loader, networks, 999, args, {'logger': logger})
+        validationFunc(val_loader, networks, 999, args, {'logger': logger}, test=True)
         return
 
     # For saving the model
